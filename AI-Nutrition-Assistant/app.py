@@ -16,7 +16,7 @@ DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 
-# Function to fetch weather
+# Function to fetch weather.
 
 
 def get_weather(city_name):
