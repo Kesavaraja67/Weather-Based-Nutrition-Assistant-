@@ -1,77 +1,117 @@
-from flask import Flask, render_template, request
-import mysql.connector
+import streamlit as st
 import requests
+import mysql.connector
+import os
+from dotenv import load_dotenv
 
-app = Flask(__name__)
+# Load environment variables
+load_dotenv()
 
-# MySQL Database Connection
-db = mysql.connector.connect(
-    host="#Your_Host_ADDRESS ",
-    user="YOUR_USER_NAME",
-    password="#Your_MySqL_Password",  # Replace with your actual MySQL password
-    database="Your_DB_NAME"
-)
+# API Key and DB credentials from .env
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
-cursor = db.cursor(dictionary=True)
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
 
-# OpenWeather API Key
-API_KEY = "#Your_API_ID"  # Replace with your actual API key
+# Function to fetch weather
 
-# Function to determine temperature range
-def get_temperature_range(temp):
-    if temp <= 5:
-        return "0-5°C"
-    elif temp <= 10:
-        return "5-10°C"
-    elif temp <= 15:
-        return "10-15°C"
-    elif temp <= 20:
-        return "15-20°C"
-    elif temp <= 25:
-        return "20-25°C"
-    elif temp <= 30:
-        return "25-30°C"
-    elif temp <= 35:
-        return "30-35°C"
-    else:
-        return "35-40°C"
 
-@app.route('/')
-def home():
-    return render_template('index.html')
+def get_weather(city_name):
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city_name}&appid={OPENWEATHER_API_KEY}&units=metric"
+    response = requests.get(url)
+    data = response.json()
+    if data.get("cod") != 200:
+        return None
+    weather = {
+        "city": data["name"],
+        "temperature": data["main"]["temp"],
+        "condition": data["weather"][0]["description"].title()
+    }
+    return weather
 
-@app.route('/get_recommendation', methods=['POST'])
-def get_recommendation():
-    district = request.form.get('district')
+# Function to fetch food recommendations from DB
 
-    if not district:
-        return render_template('index.html', error="Please enter a valid district name.")
 
-    weather_url = f"http://api.openweathermap.org/data/2.5/weather?q={district}&appid={API_KEY}&units=metric"
-    weather_response = requests.get(weather_url)
+def get_food_recommendations(city, temperature, meal_time):
+    try:
+        conn = mysql.connector.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+        cursor = conn.cursor(dictionary=True)
 
-    if weather_response.status_code != 200:
-        return render_template('index.html', error="Invalid district or API issue.")
+        # Temperature range calculation (bucket every 5°C)
+        lower = int(temperature // 5) * 5
+        upper = lower + 5
+        temp_range = f"{lower}-{upper}°C"
 
-    weather_data = weather_response.json()
-    temperature = weather_data['main']['temp']
-    temperature_range = get_temperature_range(temperature)
-
-    recommendations = {"Breakfast": [], "Lunch": [], "Dinner": []}
-
-    for meal_time in recommendations.keys():
         query = """
-            SELECT food_name, category, benefits, COALESCE(protein, 0.0) AS protein,
-            COALESCE(fiber, 0.0) AS fiber, COALESCE(fat, 0.0) AS fat, COALESCE(carbs, 0.0) AS carbs
-            FROM food_recommendations
-            WHERE temperature_range = %s AND city = %s AND meal_time = %s
+        SELECT food, benefits, protein, carbs, fiber, meal_time
+        FROM food_recommendations
+        WHERE city = %s AND temperature_range = %s AND meal_time = %s
         """
-        cursor.execute(query, (temperature_range, district, meal_time))
-        recommendations[meal_time] = cursor.fetchall()
+        cursor.execute(query, (city, temp_range, meal_time))
+        results = cursor.fetchall()
 
-    return render_template('index.html', recommendations=recommendations,
-                           temperature=temperature, district=district,
-                           temperature_range=temperature_range)
+        cursor.close()
+        conn.close()
 
-if __name__ == '__main__':
-    app.run(debug=True)
+        return results
+    except mysql.connector.Error as err:
+        st.error(f"Database Error: {err}")
+        return []
+
+# ---------------- Streamlit UI ----------------
+
+
+st.title("🌦️ AI-Powered Weather-Based Nutrition Assistant")
+
+# Initialize session states
+if "weather" not in st.session_state:
+    st.session_state.weather = None
+if "city" not in st.session_state:
+    st.session_state.city = "Chennai"   # default city
+
+# City input
+city = st.text_input("Enter City Name:", st.session_state.city)
+
+if st.button("Get Weather"):
+    weather = get_weather(city)
+    if weather:
+        st.session_state.weather = weather
+        st.session_state.city = city   # save city to session state
+    else:
+        st.error("City not found or API error.")
+
+# Show results only if weather is already fetched
+if st.session_state.weather:
+    weather = st.session_state.weather
+    st.subheader(f"🌍 Weather in {weather['city']}")
+    st.write(f"Temperature: {weather['temperature']}°C")
+    st.write(f"Condition: {weather['condition']}")
+
+    # Meal selection
+    meal_time = st.selectbox("Choose Meal Time:", [
+                             "Breakfast", "Lunch", "Dinner"])
+
+    # Show recommendations directly when meal_time changes
+    recommendations = get_food_recommendations(
+        weather["city"], weather["temperature"], meal_time
+    )
+
+    if recommendations:
+        st.subheader(f"🍴 Food Recommendations for {meal_time}")
+        for food in recommendations:
+            st.markdown(f"""
+            **{food['food']}**  
+            *Benefits*: {food['benefits']}  
+            **Nutrition:** Protein: {food['protein']}g | Carbs: {food['carbs']}g | Fiber: {food['fiber']}g  
+            """)
+    else:
+        st.warning("No food recommendations found for this temperature range.")
